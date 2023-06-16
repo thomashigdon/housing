@@ -588,6 +588,7 @@ async def do_rents(sales, args, func_map):
 
 async def do_properties(args, urls):
     chunk_size = 10
+    urls = list(set(urls))
     for i, chunk in enumerate(chunk_list(urls, chunk_size)):
         results = []
         log.info(f"Processing chunk #{i}/{len(urls)//chunk_size} of urls")
