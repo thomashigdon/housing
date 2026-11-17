@@ -1,6 +1,8 @@
 name: gitleaks
 
-# Scans the commits each push or PR adds; run it manually to scan the full history.
+# Scans the commits each push or PR adds, and flags commits that weren't scanned by the local
+# hook (no "Scanned-by: gitleaks" trailer). Run it manually to scan the full history.
+# Turn off the trailer check for a repo with the Actions variable REQUIRE_SCANNED_BY=false.
 on:
   push:
   pull_request:
@@ -27,7 +29,8 @@ jobs:
           echo "$SHA256  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
 
-      - name: Scan
+      - name: Pick commits
+        id: pick
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -45,5 +48,32 @@ jobs:
               range="origin/$DEFAULT_BRANCH..$GITHUB_SHA"
             fi
           fi
-          echo "Scanning: ${range:-full history}"
-          "$RUNNER_TEMP/gitleaks" git --redact --no-banner -v ${range:+--log-opts="$range"} .
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+
+      - name: Scan for secrets
+        env:
+          RANGE: ${{ steps.pick.outputs.range }}
+        run: |
+          echo "Scanning: ${RANGE:-full history}"
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner -v ${RANGE:+--log-opts="$RANGE"} .
+
+      - name: Check commits were scanned locally
+        if: steps.pick.outputs.range != '' && vars.REQUIRE_SCANNED_BY != 'false'
+        env:
+          RANGE: ${{ steps.pick.outputs.range }}
+        run: |
+          # Commits made on GitHub (web edits, merge buttons) and by bots never run local hooks.
+          missing=$(git log --no-merges --format='%H%x09%ce%x09%an%x09%cn%x09%s' "$RANGE" |
+            while IFS="$(printf '\t')" read -r sha cemail aname cname subject; do
+              [ "$cemail" = noreply@github.com ] && continue
+              case "$aname$cname" in *'[bot]'*) continue ;; esac
+              git log -1 --format=%B "$sha" | grep -qx 'Scanned-by: gitleaks' || echo "${sha:0:8} $subject"
+            done)
+          if [ -n "$missing" ]; then
+            echo "::error::Commits without a 'Scanned-by: gitleaks' trailer. The client that made them doesn't have the gitleaks hook (or skipped it):"
+            echo "$missing"
+            echo
+            echo "Set up that client: https://github.com/thomashigdon/git-hooks#set-up-a-new-client"
+            exit 1
+          fi
+          echo "All commits were scanned locally."
